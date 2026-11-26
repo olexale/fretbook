@@ -989,38 +989,76 @@ impl App {
         }
         let frets = track.frets.clamp(12, 24) as usize;
         let n = track.strings.len().max(1);
-        let neck = rect.shrink2(Vec2::new(36.0, 14.0));
-        let nut_x = neck.min.x + 18.0;
-        // fret positions with real proportions (compressed)
-        let scale = |f: f32| -> f32 { 1.0 - 2f32.powf(-f / 12.0) };
-        let total = scale(frets as f32 + 0.5);
+        // Leave room on top for fret numbers and on the left for string names + open-string markers.
+        let neck = Rect::from_min_max(rect.min + Vec2::new(64.0, 22.0), rect.max - Vec2::new(14.0, 10.0));
+        let nut_x = neck.min.x;
+        // Fret positions with real (equal-temperament) proportions, slightly compressed so high frets stay usable.
+        let scale = |f: f32| -> f32 { 1.0 - 2f32.powf(-f / 17.0) };
+        let total = scale(frets as f32 + 0.6);
         let fx = |f: f32| nut_x + (neck.max.x - nut_x) * scale(f) / total;
-        p.rect_filled(Rect::from_min_max(Pos2::new(nut_x, neck.min.y), neck.max), 4.0, Color32::from_rgb(92, 60, 38));
-        for f in 1..=frets {
-            let x = fx(f as f32);
-            p.line_segment([Pos2::new(x, neck.min.y), Pos2::new(x, neck.max.y)], Stroke::new(2.0, Color32::from_rgb(200, 200, 190)));
-            p.text(Pos2::new((fx(f as f32 - 1.0) + x) / 2.0, neck.max.y + 2.0), Align2::CENTER_TOP, f.to_string(), FontId::proportional(9.0), Color32::GRAY);
+        let fret_mid = |f: usize| (fx(f as f32 - 1.0) + fx(f as f32)) / 2.0;
+
+        // Rosewood fingerboard with a subtle vertical shading (lighter in the middle).
+        let wood_dark = Color32::from_rgb(52, 30, 18);
+        let wood_light = Color32::from_rgb(84, 52, 32);
+        let bands = 12;
+        for i in 0..bands {
+            let t0 = i as f32 / bands as f32;
+            let t1 = (i + 1) as f32 / bands as f32;
+            let k = 1.0 - ((t0 + t1) - 1.0).abs();
+            let c = Color32::from_rgb(
+                (wood_dark.r() as f32 + (wood_light.r() as f32 - wood_dark.r() as f32) * k) as u8,
+                (wood_dark.g() as f32 + (wood_light.g() as f32 - wood_dark.g() as f32) * k) as u8,
+                (wood_dark.b() as f32 + (wood_light.b() as f32 - wood_dark.b() as f32) * k) as u8,
+            );
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(nut_x, neck.min.y + neck.height() * t0), Pos2::new(neck.max.x, neck.min.y + neck.height() * t1 + 0.5)),
+                0.0,
+                c,
+            );
         }
-        p.rect_filled(Rect::from_min_max(Pos2::new(nut_x - 5.0, neck.min.y), Pos2::new(nut_x, neck.max.y)), 1.0, Color32::from_rgb(235, 230, 210));
+        // Binding along the edges.
+        p.line_segment([Pos2::new(nut_x, neck.min.y), Pos2::new(neck.max.x, neck.min.y)], Stroke::new(1.5, Color32::from_rgb(225, 215, 190)));
+        p.line_segment([Pos2::new(nut_x, neck.max.y), Pos2::new(neck.max.x, neck.max.y)], Stroke::new(1.5, Color32::from_rgb(225, 215, 190)));
+
+        // Inlays (pearl dots), drawn before frets and strings.
         let cy = neck.center().y;
+        let inlay = Color32::from_rgb(232, 226, 210);
         for f in [3, 5, 7, 9, 15, 17, 19, 21] {
             if f <= frets {
-                p.circle_filled(Pos2::new((fx(f as f32 - 1.0) + fx(f as f32)) / 2.0, cy), 5.0, Color32::from_rgb(220, 215, 200));
+                p.circle_filled(Pos2::new(fret_mid(f), cy), 6.0, inlay);
             }
         }
         for f in [12, 24] {
             if f <= frets {
-                let x = (fx(f as f32 - 1.0) + fx(f as f32)) / 2.0;
                 let h = neck.height() / 4.0;
-                p.circle_filled(Pos2::new(x, cy - h), 5.0, Color32::from_rgb(220, 215, 200));
-                p.circle_filled(Pos2::new(x, cy + h), 5.0, Color32::from_rgb(220, 215, 200));
+                p.circle_filled(Pos2::new(fret_mid(f), cy - h), 6.0, inlay);
+                p.circle_filled(Pos2::new(fret_mid(f), cy + h), 6.0, inlay);
             }
         }
-        let sy = |s: usize| neck.min.y + 6.0 + (neck.height() - 12.0) * s as f32 / (n.max(2) - 1) as f32;
+
+        // Metal fret wires with a highlight, and fret numbers above the neck.
+        for f in 1..=frets {
+            let x = fx(f as f32);
+            p.line_segment([Pos2::new(x, neck.min.y), Pos2::new(x, neck.max.y)], Stroke::new(3.0, Color32::from_rgb(150, 150, 150)));
+            p.line_segment([Pos2::new(x - 0.5, neck.min.y), Pos2::new(x - 0.5, neck.max.y)], Stroke::new(1.0, Color32::from_rgb(235, 235, 235)));
+            let marked = matches!(f, 3 | 5 | 7 | 9 | 12 | 15 | 17 | 19 | 21 | 24);
+            let col = if marked { Color32::from_rgb(220, 220, 220) } else { Color32::from_rgb(140, 140, 140) };
+            p.text(Pos2::new(fret_mid(f), neck.min.y - 4.0), Align2::CENTER_BOTTOM, f.to_string(), FontId::proportional(11.0), col);
+        }
+        // Bone nut.
+        p.rect_filled(Rect::from_min_max(Pos2::new(nut_x - 6.0, neck.min.y - 1.0), Pos2::new(nut_x, neck.max.y + 1.0)), 1.0, Color32::from_rgb(240, 234, 214));
+
+        // Strings: thicker and bronze-coloured for the wound (lower) strings.
+        let sy = |s: usize| neck.min.y + 8.0 + (neck.height() - 16.0) * s as f32 / (n.max(2) - 1) as f32;
         for s in 0..n {
-            let w = 1.0 + s as f32 * 0.35;
-            p.line_segment([Pos2::new(nut_x - 5.0, sy(s)), Pos2::new(neck.max.x, sy(s))], Stroke::new(w, Color32::from_rgb(210, 205, 195)));
-            p.text(Pos2::new(neck.min.x - 6.0, sy(s)), Align2::RIGHT_CENTER, gp::pitch_name(track.strings[s]), FontId::proportional(11.0), Color32::LIGHT_GRAY);
+            let w = 1.0 + s as f32 * 0.45;
+            let wound = n >= 6 && s >= n / 2;
+            let col = if wound { Color32::from_rgb(205, 180, 135) } else { Color32::from_rgb(220, 220, 220) };
+            let y = sy(s);
+            p.line_segment([Pos2::new(nut_x - 6.0, y + 1.0), Pos2::new(neck.max.x, y + 1.0)], Stroke::new(w, Color32::from_black_alpha(110)));
+            p.line_segment([Pos2::new(nut_x - 6.0, y), Pos2::new(neck.max.x, y)], Stroke::new(w, col));
+            p.text(Pos2::new(rect.min.x + 10.0, y), Align2::LEFT_CENTER, gp::pitch_name(track.strings[s]), FontId::proportional(11.0), Color32::LIGHT_GRAY);
         }
         // notes at the cursor
         let (h, tick) = if self.player.is_playing() {
@@ -1034,13 +1072,22 @@ impl App {
                 if s >= n {
                     continue;
                 }
-                let x = if note.fret == 0 { nut_x - 12.0 } else { (fx(note.fret as f32 - 1.0) + fx(note.fret as f32)) / 2.0 };
+                let fret = note.fret.max(0) as usize;
+                if fret > frets {
+                    continue;
+                }
+                let x = if fret == 0 { nut_x - 20.0 } else { fret_mid(fret) };
                 let c = Pos2::new(x, sy(s));
                 let col = Color32::from_rgb(track.color[0].max(60), track.color[1].max(40), track.color[2].max(40));
-                p.circle_filled(c, 9.0, col);
-                p.circle_stroke(c, 9.0, Stroke::new(1.5, Color32::WHITE));
+                let r = (neck.height() / (n as f32 * 2.0)).clamp(8.0, 12.0);
+                // Soft glow so the playing note stands out on the dark wood.
+                for (i, a) in [(3.0, 40u8), (6.0, 22u8)] {
+                    p.circle_filled(c, r + i, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a));
+                }
+                p.circle_filled(c, r, col);
+                p.circle_stroke(c, r, Stroke::new(1.5, Color32::WHITE));
                 let label = if note.kind == gp::NoteKind::Dead { "x".to_string() } else { gp::pitch_name(track.pitch_of(note)) };
-                p.text(c, Align2::CENTER_CENTER, label, FontId::proportional(10.0), Color32::WHITE);
+                p.text(c, Align2::CENTER_CENTER, label, FontId::proportional(r.min(11.0)), Color32::WHITE);
             }
         }
         // click to hear a note
@@ -1604,7 +1651,7 @@ impl eframe::App for App {
             });
         });
         if self.s.show_fretboard {
-            egui::Panel::bottom("fretboard").exact_size(130.0).frame(egui::Frame::NONE).show(ui, |ui| {
+            egui::Panel::bottom("fretboard").exact_size(170.0).frame(egui::Frame::NONE).show(ui, |ui| {
                 self.fretboard(ui);
             });
         }
