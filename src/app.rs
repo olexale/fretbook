@@ -30,6 +30,7 @@ struct Settings {
     mode: ViewMode,
     show_library: bool,
     show_fretboard: bool,
+    show_piano: bool,
     show_mixer: bool,
     metronome: bool,
     count_in: bool,
@@ -86,6 +87,7 @@ impl Default for Settings {
             mode: ViewMode::Both,
             show_library: true,
             show_fretboard: true,
+            show_piano: false,
             show_mixer: true,
             metronome: false,
             count_in: false,
@@ -620,6 +622,7 @@ impl App {
                 ui.checkbox(&mut self.s.show_library, "Library");
                 ui.checkbox(&mut self.s.show_mixer, "Tracks panel");
                 ui.checkbox(&mut self.s.show_fretboard, "Fretboard");
+                ui.checkbox(&mut self.s.show_piano, "Piano");
                 ui.separator();
                 if ui.button("Zoom in").clicked() {
                     self.s.zoom = (self.s.zoom + 0.1).min(2.5);
@@ -693,6 +696,8 @@ impl App {
             if icon_button(ui, Icon::Next, false).on_hover_text("Next bar (→)").clicked() {
                 self.move_bar(1);
             }
+            ui.separator();
+            ui.checkbox(&mut self.s.show_piano, "Piano").on_hover_text("Show the piano keyboard");
             ui.separator();
             // position
             let (bar, time) = if playing {
@@ -1128,6 +1133,108 @@ impl App {
         }
     }
 
+    /// An 88-key piano (A0–C8) that lights up the notes sounding on the current track.
+    fn piano(&mut self, ui: &mut egui::Ui) {
+        const LOW: i32 = 21; // A0
+        const HIGH: i32 = 108; // C8
+        let is_black = |p: i32| matches!(p.rem_euclid(12), 1 | 3 | 6 | 8 | 10);
+        let song = self.song.clone();
+        let Some(track) = song.tracks.get(self.track) else { return };
+        let rect = ui.available_rect_before_wrap();
+        let (rect, resp) = ui.allocate_exact_size(rect.size(), Sense::click());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 0.0, Color32::from_rgb(28, 28, 30));
+        if track.percussion {
+            p.text(rect.center(), Align2::CENTER_CENTER, "Drum track — no piano", FontId::proportional(14.0), Color32::LIGHT_GRAY);
+            return;
+        }
+
+        // Pitches sounding at the cursor (or the playback position) on the current track.
+        let (h, tick) = if self.player.is_playing() {
+            self.timeline.locate(&song, self.player.position()).unwrap_or(self.cursor)
+        } else {
+            self.cursor
+        };
+        let active: Vec<i32> = track
+            .measures
+            .get(h)
+            .and_then(|m| m.beats.iter().rev().find(|b| b.start <= tick))
+            .map(|b| b.notes.iter().filter(|n| n.kind != gp::NoteKind::Dead).map(|n| track.pitch_of(n)).collect())
+            .unwrap_or_default();
+        let col = Color32::from_rgb(track.color[0].max(60), track.color[1].max(40), track.color[2].max(40));
+
+        let kb = rect.shrink2(Vec2::new(8.0, 6.0));
+        let whites: Vec<i32> = (LOW..=HIGH).filter(|p| !is_black(*p)).collect();
+        let ww = kb.width() / whites.len() as f32;
+        let bw = ww * 0.62;
+        let bh = kb.height() * 0.62;
+        let white_x = |p: i32| kb.min.x + whites.iter().position(|w| *w == p).unwrap_or(0) as f32 * ww;
+        let key_rect = |p: i32| -> Rect {
+            if is_black(p) {
+                let x = white_x(p - 1) + ww - bw / 2.0;
+                Rect::from_min_size(Pos2::new(x, kb.min.y), Vec2::new(bw, bh))
+            } else {
+                Rect::from_min_size(Pos2::new(white_x(p), kb.min.y), Vec2::new(ww, kb.height()))
+            }
+        };
+
+        for &w in &whites {
+            let r = key_rect(w).shrink2(Vec2::new(0.5, 0.0));
+            let on = active.contains(&w);
+            p.rect_filled(r, 2.0, if on { col } else { Color32::from_rgb(246, 244, 238) });
+            p.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_rgb(90, 90, 90)), egui::StrokeKind::Inside);
+            // Label every C (and every active key) so the octave is easy to find.
+            if on || w % 12 == 0 {
+                let label = if w % 12 == 0 { format!("C{}", w / 12 - 1) } else { gp::pitch_name(w) };
+                let tc = if on { Color32::WHITE } else { Color32::from_rgb(120, 120, 120) };
+                p.text(Pos2::new(r.center().x, r.max.y - 4.0), Align2::CENTER_BOTTOM, label, FontId::proportional((ww * 0.45).clamp(7.0, 11.0)), tc);
+            }
+        }
+        for b in (LOW..=HIGH).filter(|p| is_black(*p)) {
+            let r = key_rect(b);
+            let on = active.contains(&b);
+            p.rect_filled(r, 2.0, if on { col } else { Color32::from_rgb(24, 24, 26) });
+            if !on {
+                // Simple highlight to give the black keys some depth.
+                p.rect_filled(Rect::from_min_size(r.min + Vec2::new(2.0, 0.0), Vec2::new(r.width() - 4.0, r.height() - 5.0)), 1.5, Color32::from_rgb(52, 52, 56));
+            }
+        }
+        // Thin felt strip along the top edge of the keys.
+        p.rect_filled(Rect::from_min_size(kb.min, Vec2::new(kb.width(), 3.0)), 0.0, Color32::from_rgb(140, 20, 30));
+
+        // Click a key to hear it.
+        if resp.clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let hit = (LOW..=HIGH)
+                    .filter(|p| is_black(*p))
+                    .find(|b| key_rect(*b).contains(pos))
+                    .or_else(|| whites.iter().copied().find(|w| key_rect(*w).contains(pos)));
+                if let Some(pitch) = hit {
+                    self.player.send(Cmd::Preview(timing::NoteEvent {
+                        time: 0.0,
+                        dur: 1.2,
+                        track: self.track,
+                        string: 99,
+                        pitch: pitch as f32,
+                        velocity: 0.8,
+                        sound: timing::sound_for(track.channel.instrument, false),
+                        palm_mute: false,
+                        dead: false,
+                        vibrato: false,
+                        hammer: false,
+                        bend: None,
+                        slide_to: 0.0,
+                        slide: false,
+                        pan: 0.0,
+                        volume: 1.0,
+                        program: track.channel.instrument,
+                        harmonic: false,
+                    }));
+                }
+            }
+        }
+    }
+
     fn score_view(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width();
         let page_w = (width - 24.0).clamp(400.0, 1400.0 * self.s.zoom.max(1.0));
@@ -1468,6 +1575,7 @@ impl App {
                 Action::Library => self.s.show_library = !self.s.show_library,
                 Action::Mixer => self.s.show_mixer = !self.s.show_mixer,
                 Action::Fretboard => self.s.show_fretboard = !self.s.show_fretboard,
+                Action::Piano => self.s.show_piano = !self.s.show_piano,
                 Action::ZoomIn => self.s.zoom = (self.s.zoom + 0.1).min(2.5),
                 Action::ZoomOut => self.s.zoom = (self.s.zoom - 0.1).max(0.6),
                 Action::ZoomReset => self.s.zoom = 1.0,
@@ -1519,6 +1627,7 @@ impl App {
             library: self.s.show_library,
             mixer: self.s.show_mixer,
             fretboard: self.s.show_fretboard,
+            piano: self.s.show_piano,
             theme: match self.s.theme {
                 ThemeChoice::System => 0,
                 ThemeChoice::Light => 1,
@@ -1653,6 +1762,11 @@ impl eframe::App for App {
         if self.s.show_fretboard {
             egui::Panel::bottom("fretboard").exact_size(170.0).frame(egui::Frame::NONE).show(ui, |ui| {
                 self.fretboard(ui);
+            });
+        }
+        if self.s.show_piano {
+            egui::Panel::bottom("piano").exact_size(110.0).frame(egui::Frame::NONE).show(ui, |ui| {
+                self.piano(ui);
             });
         }
         if self.s.show_library {
